@@ -294,28 +294,28 @@ class Resource(metaclass=DeclarativeMetaclass):
         if errors:
             raise ValidationError(errors)
 
-    def save_instance(self, instance, using_transactions=True, dry_run=False):
+    def save_instance(self, instance, using_transactions=True, dry_run=False, row_result=None):
         """
         Takes care of saving the object to the database.
 
         Keep in mind that this is done by calling ``instance.save()``, so
         objects are not created in bulk!
         """
-        self.before_save_instance(instance, using_transactions, dry_run)
+        self.before_save_instance(instance, using_transactions, dry_run, row_result)
         if not using_transactions and dry_run:
             # we don't have transactions and we want to do a dry_run
             pass
         else:
             instance.save()
-        self.after_save_instance(instance, using_transactions, dry_run)
+        self.after_save_instance(instance, using_transactions, dry_run, row_result)
 
-    def before_save_instance(self, instance, using_transactions, dry_run):
+    def before_save_instance(self, instance, using_transactions, dry_run, row_result):
         """
         Override to add additional logic. Does nothing by default.
         """
         pass
 
-    def after_save_instance(self, instance, using_transactions, dry_run):
+    def after_save_instance(self, instance, using_transactions, dry_run, row_result):
         """
         Override to add additional logic. Does nothing by default.
         """
@@ -513,7 +513,7 @@ class Resource(metaclass=DeclarativeMetaclass):
                     row_result.import_type = RowResult.IMPORT_TYPE_SKIP
                 else:
                     self.validate_instance(instance, import_validation_errors)
-                    self.save_instance(instance, using_transactions, dry_run)
+                    self.save_instance(instance, using_transactions, dry_run, row_result)
                     self.save_m2m(instance, row, using_transactions, dry_run)
                     # Add object info to RowResult for LogEntry
                     row_result.object_id = instance.pk
