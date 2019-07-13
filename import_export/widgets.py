@@ -1,7 +1,7 @@
 import ast
 import json
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
@@ -86,7 +86,10 @@ class DecimalWidget(NumberWidget):
     def clean(self, value, row=None, *args, **kwargs):
         if self.is_empty(value):
             return None
-        return Decimal(value)
+        try:
+            return Decimal(value)
+        except InvalidOperation:
+            raise ValueError("Could not convert %s to decimal value" % value)
 
 
 class CharWidget(Widget):
