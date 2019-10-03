@@ -100,7 +100,10 @@ class Result:
         self.failed_dataset.headers = headers + ["Error"]
 
     def append_failed_row(self, row, error):
-        row_values = [v for (k, v) in row.items()]
+        row_values = []
+        for key in self.failed_dataset.headers:
+            if key != 'Error':
+                row_values.append(row[key])
         try:
             row_values.append(str(error.error))
         except AttributeError:
