@@ -18,6 +18,7 @@ class RowResult:
     IMPORT_TYPE_SKIP = 'skip'
     IMPORT_TYPE_ERROR = 'error'
     IMPORT_TYPE_INVALID = 'invalid'
+    IMPORT_TYPE_POTENTIAL_DUPLICATE = 'potential_duplicate'
 
     valid_import_types = frozenset([
         IMPORT_TYPE_NEW,
@@ -32,6 +33,21 @@ class RowResult:
         self.diff = None
         self.import_type = None
         self.raw_values = {}
+
+
+import json
+class PotentialDuplicate(ValueError):
+    def __init__(self, dupes=[]):
+        self.dupes = dupes
+        self.messages = [
+            "Potential duplicates",
+        ]
+        
+    def __str__(self):
+        return json.dumps({
+            "error": "PotentialDuplicates",
+            "dupes": [i.id for i in self.dupes],
+        })
 
 
 class InvalidRow:
@@ -75,13 +91,17 @@ class Result:
         self.diff_headers = []
         self.rows = []  # RowResults
         self.invalid_rows = []  # InvalidRow
+        self.potential_duplicate_rows = []  # InvalidRow
         self.failed_dataset = Dataset()
-        self.totals = OrderedDict([(RowResult.IMPORT_TYPE_NEW, 0),
-                                   (RowResult.IMPORT_TYPE_UPDATE, 0),
-                                   (RowResult.IMPORT_TYPE_DELETE, 0),
-                                   (RowResult.IMPORT_TYPE_SKIP, 0),
-                                   (RowResult.IMPORT_TYPE_ERROR, 0),
-                                   (RowResult.IMPORT_TYPE_INVALID, 0)])
+        self.totals = OrderedDict([
+            (RowResult.IMPORT_TYPE_NEW, 0),
+            (RowResult.IMPORT_TYPE_UPDATE, 0),
+            (RowResult.IMPORT_TYPE_DELETE, 0),
+            (RowResult.IMPORT_TYPE_SKIP, 0),
+            (RowResult.IMPORT_TYPE_ERROR, 0),
+            (RowResult.IMPORT_TYPE_INVALID, 0),
+            (RowResult.IMPORT_TYPE_POTENTIAL_DUPLICATE, 0),
+        ])
         self.total_rows = 0
 
     def valid_rows(self):
@@ -117,6 +137,14 @@ class Result:
             values=row.values(),
         ))
 
+    def append_potential_duplicate_row(self, number, row,
+                                       potential_duplicate_error):
+        self.potential_duplicate_rows.append(InvalidRow(
+            number=number,
+            validation_error=potential_duplicate_error,
+            values=row.values(),
+        ))
+        
     def increment_row_result_total(self, row_result):
         if row_result.import_type:
             self.totals[row_result.import_type] += 1

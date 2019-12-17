@@ -27,7 +27,7 @@ from django.utils.safestring import mark_safe
 from . import widgets
 from .fields import Field
 from .instance_loaders import ModelInstanceLoader
-from .results import Error, Result, RowResult
+from .results import Error, Result, RowResult, PotentialDuplicate
 from .utils import atomic_if_using_transaction
 
 logger = logging.getLogger(__name__)
@@ -224,6 +224,9 @@ class Resource(metaclass=DeclarativeMetaclass):
         """
         return Diff
 
+    def get_instance_loader(self, dataset):
+        return self._meta.instance_loader_class(self, dataset)
+    
     def get_use_transactions(self):
         if self._meta.use_transactions is None:
             return USE_TRANSACTIONS
@@ -465,7 +468,8 @@ class Resource(metaclass=DeclarativeMetaclass):
         """
         pass
 
-    def import_row(self, row, instance_loader, using_transactions=True, dry_run=False, **kwargs):
+    def import_row(self, row, instance_loader, using_transactions=True,
+                   dry_run=False, reject_potential_duplicates=False, **kwargs):
         """
         Imports data from ``tablib.Dataset``. Refer to :doc:`import_workflow`
         for a more complete description of the whole import process.
@@ -479,11 +483,22 @@ class Resource(metaclass=DeclarativeMetaclass):
 
         :param dry_run: If ``dry_run`` is set, or error occurs, transaction
             will be rolled back.
+
+        :param reject_potential_duplicates: If ``reject_potential_duplicates``
+            is set, rows that raise a PotentialDuplicate exception will not be
+            imported. By default, they will be imported as new instances.
         """
         row_result = self.get_row_result_class()()
         try:
             self.before_import_row(row, **kwargs)
-            instance, new = self.get_or_init_instance(instance_loader, row)
+
+            potential_duplicates = None
+            try:
+                instance, new = self.get_or_init_instance(instance_loader, row)
+            except PotentialDuplicate as e:
+                instance, new = (self.init_instance(row), True)
+                potential_duplicates = e
+    
             self.after_import_instance(instance, new, **kwargs)
             if new:
                 row_result.import_type = RowResult.IMPORT_TYPE_NEW
@@ -513,15 +528,21 @@ class Resource(metaclass=DeclarativeMetaclass):
                     row_result.import_type = RowResult.IMPORT_TYPE_SKIP
                 else:
                     self.validate_instance(instance, import_validation_errors)
-                    self.save_instance(instance, using_transactions, dry_run, row, row_result, original)
-                    self.save_m2m(instance, row, using_transactions, dry_run)
-                    # Add object info to RowResult for LogEntry
-                    row_result.object_id = instance.pk
-                    row_result.object_repr = force_text(instance)
+
+                    if reject_potential_duplicates and potential_duplicates:
+                        row_result.import_type = RowResult.IMPORT_TYPE_POTENTIAL_DUPLICATE
+                        row_result.validation_error = potential_duplicates
+                    else:
+                        self.save_instance(instance, using_transactions, dry_run, row, row_result, original)
+                        self.save_m2m(instance, row, using_transactions, dry_run)
+                        # Add object info to RowResult for LogEntry
+                        row_result.object_id = instance.pk
+                        row_result.object_repr = force_text(instance)
                 diff.compare_with(self, instance, dry_run)
 
-            row_result.diff = diff.as_html()
-            self.after_import_row(row, row_result, **kwargs)
+            if not reject_potential_duplicates or potential_duplicates is None:
+                row_result.diff = diff.as_html()
+                self.after_import_row(row, row_result, **kwargs)
 
         except ValidationError as e:
             row_result.import_type = RowResult.IMPORT_TYPE_INVALID
@@ -537,7 +558,8 @@ class Resource(metaclass=DeclarativeMetaclass):
         return row_result
 
     def import_data(self, dataset, dry_run=False, raise_errors=False,
-                    use_transactions=None, collect_failed_rows=False, **kwargs):
+                    use_transactions=None, collect_failed_rows=False,
+                    reject_potential_duplicates=False, **kwargs):
         """
         Imports data from ``tablib.Dataset``. Refer to :doc:`import_workflow`
         for a more complete description of the whole import process.
@@ -569,9 +591,9 @@ class Resource(metaclass=DeclarativeMetaclass):
         using_transactions = (use_transactions or dry_run) and supports_transactions
 
         with atomic_if_using_transaction(using_transactions):
-            return self.import_data_inner(dataset, dry_run, raise_errors, using_transactions, collect_failed_rows, **kwargs)
+            return self.import_data_inner(dataset, dry_run, raise_errors, using_transactions, collect_failed_rows, reject_potential_duplicates, **kwargs)
 
-    def import_data_inner(self, dataset, dry_run, raise_errors, using_transactions, collect_failed_rows, **kwargs):
+    def import_data_inner(self, dataset, dry_run, raise_errors, using_transactions, collect_failed_rows, reject_potential_duplicates, **kwargs):
         result = self.get_result_class()()
         result.diff_headers = self.get_diff_headers()
         result.total_rows = len(dataset)
@@ -591,7 +613,7 @@ class Resource(metaclass=DeclarativeMetaclass):
             if raise_errors:
                 raise
 
-        instance_loader = self._meta.instance_loader_class(self, dataset)
+        instance_loader = self.get_instance_loader(dataset)
 
         # Update the total in case the dataset was altered by before_import()
         result.total_rows = len(dataset)
@@ -606,6 +628,7 @@ class Resource(metaclass=DeclarativeMetaclass):
                     instance_loader,
                     using_transactions=using_transactions,
                     dry_run=dry_run,
+                    reject_potential_duplicates=reject_potential_duplicates,
                     **kwargs
                 )
             result.increment_row_result_total(row_result)
@@ -616,9 +639,12 @@ class Resource(metaclass=DeclarativeMetaclass):
                 if raise_errors:
                     raise row_result.errors[-1].error
             elif row_result.validation_error:
-                result.append_invalid_row(i, row, row_result.validation_error)
-                if collect_failed_rows:
-                    result.append_failed_row(row, row_result.validation_error)
+                if row_result.import_type == RowResult.IMPORT_TYPE_POTENTIAL_DUPLICATE:
+                    result.append_potential_duplicate_row(i, row, row_result.validation_error)
+                else:
+                    result.append_invalid_row(i, row, row_result.validation_error)
+                    if collect_failed_rows:
+                        result.append_failed_row(row, row_result.validation_error)
                 if raise_errors:
                     raise row_result.validation_error
             if (row_result.import_type != RowResult.IMPORT_TYPE_SKIP or
